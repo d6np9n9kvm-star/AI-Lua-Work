@@ -1,0 +1,26 @@
+<?xml version="1.1" ?>
+<settings>
+    <global>
+        <layout>expanded</layout>
+        <opacity>205</opacity>
+        <scale>1</scale>
+        <schema>1</schema>
+        <sections>
+            <automation>true</automation>
+            <combat>true</combat>
+            <diagnostics>true</diagnostics>
+            <loadout>true</loadout>
+            <magic>true</magic>
+            <shortcuts>true</shortcuts>
+        </sections>
+        <visible>true</visible>
+        <x>675</x>
+        <y>950</y>
+    </global>
+    <falurian>
+        <layout>compact</layout>
+        <opacity>155</opacity>
+        <x>969</x>
+        <y>1242</y>
+    </falurian>
+</settings>

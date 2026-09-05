@@ -1,0 +1,23 @@
+<?xml version="1.1" ?>
+<settings>
+    <global>
+        <layout>expanded</layout>
+        <opacity>205</opacity>
+        <scale>1</scale>
+        <schema>1</schema>
+        <sections>
+            <buffs>true</buffs>
+            <combat>true</combat>
+            <loadout>true</loadout>
+            <shortcuts>true</shortcuts>
+            <utility>true</utility>
+        </sections>
+        <visible>true</visible>
+        <x>675</x>
+        <y>950</y>
+    </global>
+    <falurian>
+        <x>998</x>
+        <y>1225</y>
+    </falurian>
+</settings>
