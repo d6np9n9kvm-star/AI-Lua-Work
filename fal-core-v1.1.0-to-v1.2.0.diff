@@ -1,0 +1,402 @@
+--- fal-core.v1.1.0.lua	2026-09-05 13:59:21.211313178 +0000
++++ fal-core.lua	2026-09-05 14:06:06.445833088 +0000
+@@ -10,7 +10,7 @@
+ -- USAGE, from a job lua:
+ --       FalCore = {}
+ --       include('fal-core.lua', FalCore)
+---       FalCore.require_version('1.1.0', 'WAR')     -- see the pcall warning below
++--       FalCore.require_version('1.2.0', 'WAR')     -- see the pcall warning below
+ --       FalCore.init{ job = 'WAR', movement_ring = 'Shneddick Ring' }
+ --
+ -- WHY A NAMESPACE TABLE, NOT GLOBALS:
+@@ -35,6 +35,28 @@
+ --   clearest case.
+ --
+ -- CHANGELOG
++--   1.2.0  Hardening pass after an independent review of v1.0.1.
++--          * COMPLETE-LOAD SENTINEL: manifest.complete is assigned on the last line, and
++--            require_version now also verifies every symbol in MANIFEST_REQUIRED. The old
++--            guard only proved `version` existed, so a chunk that faulted after that
++--            point still passed -- precisely the failure GearSwap's swallowed pcall makes
++--            invisible.
++--          * require_version now compares major.minor.PATCH. It previously ignored the
++--            patch field while the documented call site asked for one (`'1.0.1'`), so a
++--            job requesting the movement-bug fix would happily accept 1.0.0.
++--          * locks.refresh() replaces three `if type(check_gear)=='function'` calls.
++--            check_gear is defined ONLY by RDM, so on WAR and BLU those were dead: Core
++--            owned the ring mechanics but delegated the refresh to a global that did not
++--            exist. Jobs now use init{on_ring_refresh=fn}.
++--          * RING_RELEASE_SETTLE restored to RDM's 1.0s (RDM.lua:6605); 1.0.0-1.1.0
++--            shipped 0.6 with no justification.
++--          * move.handle_refresh validates the token BEFORE clearing refresh_queued.
++--          * Keybinds: job slots that collide with a reserved universal key are now a
++--            hard error, and keys.report prints only the F10-F12 keys this job bound.
++--          * TH gained a policy seam (init{th_policy}) so a future THF is not forced to
++--            fork Core; movement stores kiting_override instead of overwriting the method.
++--          * Callback errors from on_movement_change / th_policy / on_ring_refresh are
++--            reported instead of swallowed. init() is now genuinely idempotent.
+ --   1.1.0  Added util.ring_name (handles both left_ring/right_ring and ring1/ring2 key
+ --          spellings -- WAR handled both, RDM assumed one) and locks.clear_fishing_rod.
+ --          locks.release_rings now carries WAR's reload token guard, which RDM lacked.
+@@ -47,17 +69,62 @@
+ --   1.0.0  Initial extraction from RDM v2.62: util, perf, events, locks, th, move, keys.
+ -------------------------------------------------------------------------------------------------------------------
+ 
+-version = '1.1.0'
++-- GearSwap calls this chunk as pcall(chunk, <the namespace table>), so `...` IS that
++-- table. getfenv(1) is the fallback for the plain include() form.
++local CORE_SELF = ... or getfenv(1)
++
++version = '1.2.0'
++
++-- Every symbol a job file is entitled to rely on.  MANIFEST_REQUIRED is checked by
++-- require_version, so a chunk that dies halfway through cannot pass the guard.
++MANIFEST_REQUIRED = {
++    'version','manifest','require_version','init','unload','self_command',
++    'ALL_EQUIP_SLOTS','FISHING_LOCK_SLOTS','UNIVERSAL_BINDS','ACTION_ROW',
++    'util','perf','events','locks','th','move','keys',
++}
++
++local function parse_version(v)
++    local a,b,c = tostring(v):match('^(%d+)%.(%d+)%.(%d+)$')
++    if not a then return nil end
++    return tonumber(a), tonumber(b), tonumber(c)
++end
+ 
+--- Semantic-ish guard.  Compares major.minor only; a patch bump never breaks a job file.
++-- Guard against BOTH failure modes of GearSwap's table-form include():
++--   1. the chunk faulted partway (pcall swallows the error) -> manifest.complete is nil,
++--      or a module listed in MANIFEST_REQUIRED is missing;
++--   2. an older Core is installed than this job needs -> version comparison.
++-- `wanted` is a full x.y.z and means ">= wanted" within the same major.
+ function require_version(wanted, who)
+-    local wmaj, wmin = tostring(wanted):match('^(%d+)%.(%d+)')
+-    local hmaj, hmin = tostring(version):match('^(%d+)%.(%d+)')
+-    if not (wmaj and hmaj) then
+-        error('fal-core: bad version string (wanted '..tostring(wanted)..', have '..tostring(version)..')', 2)
+-    end
+-    if wmaj ~= hmaj or tonumber(hmin) < tonumber(wmin) then
+-        error(string.format('fal-core %s is loaded but %s requires %s', version, tostring(who or '?'), tostring(wanted)), 2)
++    who = tostring(who or '?')
++
++    -- (1) completeness. manifest.complete is assigned on the LAST line of this file.
++    if not (manifest and manifest.complete) then
++        error('fal-core: PARTIAL LOAD -- the chunk faulted before completing and GearSwap '
++            ..'discarded the error. '..who..' cannot run. Check fal-core.lua for a runtime fault.', 2)
++    end
++    local missing = {}
++    for _, sym in ipairs(MANIFEST_REQUIRED) do
++        if rawget(manifest.owner or {}, sym) == nil then missing[#missing + 1] = sym end
++    end
++    if #missing > 0 then
++        error('fal-core: INCOMPLETE LOAD -- missing '..table.concat(missing, ', ')..'. '..who..' cannot run.', 2)
++    end
++
++    -- (2) version, comparing all three components.
++    local wmaj, wmin, wpat = parse_version(wanted)
++    local hmaj, hmin, hpat = parse_version(version)
++    if not wmaj then
++        error('fal-core: '..who..' requested a malformed version ('..tostring(wanted)..'); want x.y.z', 2)
++    end
++    if not hmaj then
++        error('fal-core: own version string is malformed ('..tostring(version)..')', 2)
++    end
++    local too_old = (hmaj ~= wmaj)
++        or (hmin < wmin)
++        or (hmin == wmin and hpat < wpat)
++    if too_old then
++        error(string.format('fal-core %s is loaded but %s requires >= %s (same major)',
++            version, who, tostring(wanted)), 2)
+     end
+     return true
+ end
+@@ -231,8 +298,13 @@
+ --   normal gear -> everything else
+ -------------------------------------------------------------------------------------------------------------------
+ 
++-- Extraction fidelity: RDM's release_ring_slots scheduled its settle at 1.0s
++-- (RDM.lua:6605, `end, 1)`).  v1.0.0-1.1.0 shipped 0.6 with no justification; restored.
++RING_RELEASE_SETTLE = 1.0
++
+ locks = {
+     ring_state = {ring1 = nil, ring2 = nil},
++    on_ring_refresh = nil,
+     releasing  = {ring1 = false, ring2 = false},
+     no_swap    = nil,   -- set by init()
+ }
+@@ -276,7 +348,7 @@
+     perf.count('ring_lock_changes')
+ end
+ 
+--- Called from the job's check_gear(). Pause and Doom own both rings outright.
++-- Pause and Doom own both rings outright. Call locks.refresh(), not this, from a job.
+ function locks.check_rings()
+     if locks.pause_active() then return end
+     if buffactive and buffactive.doom then return end
+@@ -285,6 +357,22 @@
+     locks.apply_ring('ring2', locks.is_no_swap(util.ring_name('ring2')) and not locks.releasing.ring2)
+ end
+ 
++-- Core's own ring-policy entry point.  v1.2.0 replaced three `if type(check_gear)==
++-- 'function' then check_gear() end` calls with this: `check_gear` is defined ONLY by
++-- RDM, so on WAR and BLU those calls were silently doing nothing -- Core owned the ring
++-- mechanics but delegated the refresh back to a job global that did not exist.
++-- A job needing extra work on a ring refresh sets init{on_ring_refresh=fn} instead of
++-- being required to define a specially-named global.
++function locks.refresh()
++    locks.check_rings()
++    if type(locks.on_ring_refresh) == 'function' then
++        local ok, err = pcall(locks.on_ring_refresh)
++        if not ok then
++            util.chat(123, '[fal-core] on_ring_refresh callback error: '..tostring(err))
++        end
++    end
++end
++
+ function locks.ring_protected(slot)
+     return locks.is_no_swap(util.ring_name(slot))
+ end
+@@ -315,8 +403,8 @@
+         if runtime.unloading or token ~= runtime.token then return end
+         for _, s in ipairs(slots) do locks.releasing[s] = false end
+         locks.invalidate_ring_cache()
+-        if type(check_gear) == 'function' then check_gear() end
+-    end, settle or 0.6)
++        locks.refresh()
++    end, settle or RING_RELEASE_SETTLE)
+ end
+ 
+ function locks.apply_fishing_policy()
+@@ -335,7 +423,7 @@
+     -- policy still says enabled.  Reopen, then force an immediate re-lock of any real
+     -- protected ring.
+     locks.invalidate_ring_cache()
+-    if type(check_gear) == 'function' then check_gear() end
++    locks.refresh()
+ end
+ 
+ function locks.reapply()
+@@ -344,7 +432,7 @@
+     else
+         enable(unpack(ALL_EQUIP_SLOTS))
+         locks.invalidate_ring_cache()
+-        if type(check_gear) == 'function' then check_gear() end
++        locks.refresh()
+     end
+ end
+ 
+@@ -365,19 +453,33 @@
+ -- sets and hostile-spell midcasts.  No mob tracking, ZERO event handlers.
+ -------------------------------------------------------------------------------------------------------------------
+ 
+-th = {}
++th = {policy = nil}
+ 
+ function th.active()
+     return (state and state.TreasureHunter and state.TreasureHunter.value == true) or false
+ end
+ 
+--- True when TH gear should be layered for this action. `spell` may be nil (melee).
+-function th.should_apply(spell)
++-- Default strategy: TH gear is layered whenever the toggle is on and the action is
++-- hostile.  `spell` may be nil, meaning melee.
++function th.default_should_apply(spell)
+     if not th.active() then return false end
+     if spell == nil then return true end
+     return spell.target ~= nil and spell.target.type == 'MONSTER'
+ end
+ 
++-- v1.2.0 policy seam.  The ON/OFF model above is right for every job that merely wants
++-- TH+n layered (RDM, WAR, BLU).  THF is different -- it has real TH tiers, Feint/SA/TA
++-- interactions and a reason to care which mob has already been tagged -- so a job can
++-- install its own strategy with init{th_policy=fn} rather than forking Core.
++function th.should_apply(spell)
++    if type(th.policy) == 'function' then
++        local ok, result = pcall(th.policy, spell)
++        if ok then return result == true end
++        util.chat(123, '[fal-core] th_policy callback error: '..tostring(result))
++    end
++    return th.default_should_apply(spell)
++end
++
+ -------------------------------------------------------------------------------------------------------------------
+ -- Native movement sampling
+ --
+@@ -409,9 +511,13 @@
+     on_change        = nil,    -- optional job callback: function(is_moving)
+ }
+ 
+--- The job supplies this so Core never needs to know the job's DefenseMode options.
+--- Default mirrors RDM: kite only while no defensive set owns the gear.
++-- v1.2.0: init() stores an override in move.kiting_override instead of overwriting this
++-- method, so the module's own function stays stable and a re-init cannot leave a
++-- previous job's closure installed.
++-- Default mirrors RDM: kite only while no defensive set owns the gear. WAR overrides it
++-- to always-true because it applies the movement overlay inside customize_defense_set.
+ function move.kiting_allowed()
++    if type(move.kiting_override) == 'function' then return move.kiting_override() == true end
+     if not (state and state.DefenseMode) then return true end
+     return state.DefenseMode.value == 'None'
+ end
+@@ -429,9 +535,12 @@
+ end
+ 
+ -- Consume the queued refresh. The job routes `gs c _falmovementrefresh <token>` here.
++-- v1.2.0: validate the token BEFORE mutating queue bookkeeping.  Clearing
++-- refresh_queued first meant a self-command left over from a previous load could drop
++-- the flag for the current one, so a genuinely queued refresh would never be re-queued.
+ function move.handle_refresh(token)
+-    move.refresh_queued = false
+     if tostring(token) ~= tostring(runtime.token) then return false end
++    move.refresh_queued = false
+     if not move.refresh_pending then return false end
+     move.refresh_pending = false
+     return true
+@@ -479,7 +588,12 @@
+         -- Mirror into whatever the job wants to keep in sync (a bare `moving` global,
+         -- a HUD field). Core cannot write the job's globals directly -- see the note
+         -- on the `move` table above.
+-        if type(move.on_change) == 'function' then pcall(move.on_change, new_moving) end
++        if type(move.on_change) == 'function' then
++            local ok, err = pcall(move.on_change, new_moving)
++            if not ok then
++                util.chat(123, '[fal-core] on_movement_change callback error: '..tostring(err))
++            end
++        end
+     end
+ 
+     -- A transition during a spell / full Pause / Doom waits here until that owner
+@@ -542,7 +656,7 @@
+ --   Job slots (declared per job):  Ctrl+F4, Ctrl+F5, Ctrl+F6
+ -------------------------------------------------------------------------------------------------------------------
+ 
+-keys = {bound = {}}
++keys = {bound = {}, declared_row = {}, reserved = {}}
+ 
+ UNIVERSAL_BINDS = {
+     {'^f1',  'gs c cycle OffenseMode'},
+@@ -572,6 +686,14 @@
+     keys.bound[#keys.bound + 1] = key
+ end
+ 
++-- Which universal keys a job slot may never claim.
++local function reserved_keys()
++    local r = {}
++    for _, b in ipairs(UNIVERSAL_BINDS) do r[b[1]] = b[2] end
++    for _, row in pairs(ACTION_ROW) do r[row[1]] = row[2] end
++    return r
++end
++
+ function keys.unbind_all()
+     for _, key in ipairs(keys.bound) do send_command('unbind '..key) end
+     keys.bound = {}
+@@ -582,21 +704,52 @@
+ function keys.apply(opts)
+     opts = opts or {}
+     keys.unbind_all()
++    keys.reserved = reserved_keys()
++    keys.declared_row = {}
++
++    -- v1.2.0: a job slot silently overwriting a universal key is a configuration error,
++    -- not something to discover in game. Reject it loudly before binding anything.
++    local collisions = {}
++    for key in pairs(opts.job_slots or {}) do
++        if keys.reserved[key] then
++            collisions[#collisions + 1] = key..' (reserved for: '..keys.reserved[key]..')'
++        end
++    end
++    if #collisions > 0 then
++        error('fal-core keys: job slot collides with a reserved universal key -> '
++            ..table.concat(collisions, '; '), 2)
++    end
++
+     for _, b in ipairs(UNIVERSAL_BINDS) do keys.bind(b[1], b[2]) end
+     for _, name in ipairs(opts.action_row or {}) do
+         local row = ACTION_ROW[name]
+-        if row then keys.bind(row[1], row[2]) end
++        if row then
++            keys.bind(row[1], row[2])
++            keys.declared_row[name] = row
++        else
++            util.chat(123, '[fal-core keys] unknown action_row entry: '..tostring(name))
++        end
+     end
+     for key, cmd in pairs(opts.job_slots or {}) do keys.bind(key, cmd) end
+ end
+ 
++local ROW_LABEL = {magicburst='magic burst', skillchain='close skillchain', bestws='best weapon skill'}
++
++-- v1.2.0: report only what this job actually bound.  The old version printed the whole
++-- F10-F12 row unconditionally, so WAR advertised a magic-burst key it never binds.
+ function keys.report(compact)
+     util.chat(158, string.format('=== %s keybinds (fal-core %s) ===', tostring(runtime.job or '?'), version))
+     util.chat(158, ' Ctrl: F1 offense | F2 hybrid | F3 defense | F7 idle | F9/F10 weapon | F11 lock | F12 sm')
+     util.chat(158, ' Alt:  F1 TH | F2 fishing | F3 pause | F9 hudlock | F10 hud')
++    local row = {}
++    for name, def in pairs(keys.declared_row) do
++        row[#row + 1] = def[1]:upper()..' '..(ROW_LABEL[name] or name)
++    end
++    table.sort(row)
++    util.chat(158, (#row > 0) and (' Row:  '..table.concat(row, ' | '))
++        or ' Row:  (this job binds none of F10-F12)')
+     if not compact then
+-        util.chat(158, ' Row:  F10 magic burst | F11 close skillchain | F12 best weapon skill')
+-        util.chat(158, ' Typed: gs c keys | gs c perf on|off|reset')
++        util.chat(158, ' Typed: gs c keys | gs c perf on|off|reset | gs c coreversion')
+     end
+ end
+ 
+@@ -609,6 +762,8 @@
+ -- opts.no_swap_rings  : list of protected ring names (defaults to DEFAULT_NO_SWAP_RINGS)
+ -- opts.kiting_allowed : function() -> boolean, overrides the default DefenseMode rule
+ -- opts.on_movement_change : function(is_moving), called when the movement flag flips
++-- opts.on_ring_refresh : function(), extra work after Core re-checks the ring policy
++-- opts.th_policy      : function(spell) -> boolean, replaces the default TH strategy
+ function init(opts)
+     opts = opts or {}
+     runtime.job = opts.job
+@@ -616,6 +771,16 @@
+     runtime.token = tostring(os.time())..'-'..tostring(math.floor(os.clock() * 1000000))
+     runtime.event_ids = {}
+ 
++    -- init() is deliberately idempotent: every mutable field below is reset, so a second
++    -- init (or a reload that somehow reuses this table) cannot inherit stale state.
++    keys.bound = {}
++    keys.declared_row = {}
++    keys.reserved = {}
++    perf.counters, perf.timers, perf.order, perf.seen = {}, {}, {}, {}
++    perf.started = 0
++    th.policy = (type(opts.th_policy) == 'function') and opts.th_policy or nil
++    locks.on_ring_refresh = (type(opts.on_ring_refresh) == 'function') and opts.on_ring_refresh or nil
++
+     local ns = {}
+     for _, name in ipairs(opts.no_swap_rings or DEFAULT_NO_SWAP_RINGS) do ns[name] = true end
+     locks.no_swap = ns
+@@ -628,7 +793,7 @@
+     move.next_sample, move.last_motion_at = 0, 0
+     move.x, move.y, move.z = nil, nil, nil
+     move.refresh_pending, move.refresh_queued = false, false
+-    if type(opts.kiting_allowed) == 'function' then move.kiting_allowed = opts.kiting_allowed end
++    move.kiting_override = (type(opts.kiting_allowed) == 'function') and opts.kiting_allowed or nil
+ 
+     if opts.movement_ring then
+         events.register_raw('prerender', move.sample)
+@@ -668,3 +833,18 @@
+     end
+     return false
+ end
++
++-------------------------------------------------------------------------------------------------------------------
++-- COMPLETE-LOAD SENTINEL -- MUST REMAIN THE LAST STATEMENT IN THIS FILE.
++--
++-- GearSwap's include_user() runs this chunk under pcall() and DISCARDS the error, so a
++-- runtime fault anywhere above produces no message at all -- just a half-populated table
++-- and a confusing nil-call much later.  require_version() refuses to pass unless
++-- manifest.complete is set here AND every symbol in MANIFEST_REQUIRED is present, so a
++-- partial load fails loudly at the include site instead of silently at 3am in Odyssey.
++--
++-- `owner` is this namespace table itself, captured so require_version can introspect the
++-- symbols actually defined rather than trusting that it got far enough to define them.
++-------------------------------------------------------------------------------------------------------------------
++
++manifest = {complete = true, version = version, owner = CORE_SELF}
